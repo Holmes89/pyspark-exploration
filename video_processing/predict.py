@@ -8,24 +8,21 @@ import cv2
 
 
 def predict(index, image):
-    detection_graph = tf.Graph()
-    with detection_graph.as_default():
-        od_graph_def = tf.GraphDef()
-        with tf.gfile.GFile('{}/{}/frozen_inference_graph.pb'.format(path, model_name), 'rb') as fid:
-            serialized_graph = fid.read()
-            od_graph_def.ParseFromString(serialized_graph)
-            tf.import_graph_def(od_graph_def, name='')
-    with detection_graph.as_default():
-        with tf.Session(graph=detection_graph) as session:
+    with tf.Graph().as_default() as g:
+        graph_def = tf.GraphDef()
+        graph_def.ParseFromString(model_data_bc.value)
+        tf.import_graph_def(graph_def, name='')
+
+        with tf.Session(graph=g) as session:
             image_np_expanded = np.expand_dims(image, axis=0)
-            image_tensor = detection_graph.get_tensor_by_name('image_tensor:0')
+            image_tensor = session.graph.get_tensor_by_name('image_tensor:0')
             # Each box represents a part of the image where a particular object was detected.
-            boxes = detection_graph.get_tensor_by_name('detection_boxes:0')
+            boxes = session.graph.get_tensor_by_name('detection_boxes:0')
             # Each score represent how level of confidence for each of the objects.
             # Score is shown on the result image, together with the class label.
-            scores = detection_graph.get_tensor_by_name('detection_scores:0')
-            classes = detection_graph.get_tensor_by_name('detection_classes:0')
-            num_detections = detection_graph.get_tensor_by_name('num_detections:0')
+            scores = session.graph.get_tensor_by_name('detection_scores:0')
+            classes = session.graph.get_tensor_by_name('detection_classes:0')
+            num_detections = session.graph.get_tensor_by_name('num_detections:0')
             (boxes, scores, classes, num_detections) = session.run(
                 [boxes, scores, classes, num_detections],
                 feed_dict={image_tensor: image_np_expanded})
@@ -74,8 +71,12 @@ if __name__ == "__main__":
         file_name = os.path.basename(file.name)
         if 'frozen_inference_graph.pb' in file_name:
             tar_file.extract(file, os.getcwd())
-            
+
+    with tf.gfile.GFile('{}/{}/frozen_inference_graph.pb'.format(path, model_name), 'rb') as fid:
+        model_data = fid.read()
+
     sc = SparkContext('local', 'video_process_predict')
+    model_data_bc = sc.broadcast(model_data)
     count = sc.parallelize(range(0, frame_count)).map(lambda x: extract_images(video_path, x))\
         .filter(lambda x: predict(*x)).count()
-
+    os.removedirs('{}/{}'.format(path, model_name))
