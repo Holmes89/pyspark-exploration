@@ -34,7 +34,6 @@ if __name__ == "__main__":
     video_path = args.video
     dir_out = args.output
 
-    video = cv2.VideoCapture(video_path)
     frame_count = get_frame_count(video_path)
 
     sc = SparkContext('local', 'video_process_extract_images')
