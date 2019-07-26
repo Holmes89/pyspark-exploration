@@ -3,8 +3,26 @@ import argparse
 import tensorflow as tf
 import tarfile
 import os
+import shutil
 import numpy as np
 import cv2
+import uuid
+
+
+def denormalize_bbox(bbox_floats, image_size):
+    """Converts bbox with normalized 0-1 coordinates to [x,y,w,h] format.
+    Args:
+        bbox_floats (np.array): array of 4 floats from 0-1 that give coordinates
+                                for [y1, x1, y2, x2] normalized for image size.
+        image_size (list): Original size of image as [width, height] so the
+                           absolute bbox coordinates can be computed.
+    Returns:
+        list(int): list of bounding box absolute coordinates in [x1, y1, x2, y2] format
+    """
+    bbox_ints = (np.fliplr(bbox_floats.reshape(2, 2)) * image_size[:2][::-1]).astype(int)
+    bbox = [int(x) for x in bbox_ints.reshape(-1)]
+
+    return bbox
 
 
 def predict(index, image):
@@ -26,14 +44,68 @@ def predict(index, image):
             (boxes, scores, classes, num_detections) = session.run(
                 [boxes, scores, classes, num_detections],
                 feed_dict={image_tensor: image_np_expanded})
-            resp = {
+            return {
                 "index": index,
                 "boxes": boxes,
                 "scores": scores,
                 "classes": classes,
                 "num_detections": num_detections
-            }
-            print(resp)
+            }, image.shape
+
+
+def process_result(result, image_shape):
+    num_detections = int(result['num_detections'][0])
+
+    scores = result['scores'][0][:num_detections]
+    object_ids = list(range(1, num_detections + 1))
+
+    # bbboxes are normalized [0, 1), ymin, xmin, ymax, xmax
+    bboxes = result['boxes'][0][:num_detections]
+    denormalize_bbox_arr = []
+    for coord_set in bboxes:
+        denormalize_bbox_arr.append(denormalize_bbox(coord_set, image_shape))
+
+    # Convert from (x1,y1,x2,y2) to (x,y,w,h)
+    denormalized_bboxes = [[x1, y1, x2 - x1, y2 - y1] for
+                           (x1, y1, x2, y2) in denormalize_bbox_arr]
+
+    # convert class indexes into string (ie 'person' or 'car')
+    det_classes = result['classes'][0][:num_detections]
+    classnames = [str(int(d)) for d in det_classes]
+
+    # create detection dictionary
+    output_dict = {
+        'scores': scores,
+        'classnames': classnames,
+        'bboxes': denormalized_bboxes,
+        'client_object_ids': object_ids,
+    }
+
+    detection_list = []
+    if output_dict:
+        for classname, bbox, score, obj_id in zip(output_dict.get('classnames'),
+                                                  output_dict.get('bboxes'),
+                                                  output_dict.get('scores'),
+                                                  output_dict.get('client_object_ids')):
+            x_px = bbox[0]
+            y_px = bbox[1]
+            xoffset_px = bbox[2]
+            yoffset_px = bbox[3]
+
+            # Save the detections to CSV
+
+            detection = {
+                        'id': str(uuid.uuid4()),
+                        'obj_id': str(obj_id),
+                        'class':   classname,
+                        'score': float(score),
+                        'x': int(x_px),
+                        'y': int(y_px),
+                        'x_offset': int(xoffset_px),
+                        'y_offset': int(yoffset_px)}
+            detection_list.append(detection)
+
+    return detection_list
 
 
 def extract_images(video_loc, index):
@@ -78,5 +150,5 @@ if __name__ == "__main__":
     sc = SparkContext('local', 'video_process_predict')
     model_data_bc = sc.broadcast(model_data)
     count = sc.parallelize(range(0, frame_count)).map(lambda x: extract_images(video_path, x))\
-        .filter(lambda x: predict(*x)).count()
-    os.removedirs('{}/{}'.format(path, model_name))
+        .map(lambda x: predict(*x)).map(lambda x: process_result(*x)).filter(lambda x: print(x)).count()
+    shutil.rmtree('{}/{}'.format(path, model_name))
